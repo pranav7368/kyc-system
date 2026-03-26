@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./kyc.db
+      - UPLOAD_DIR=./uploads
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS=["*"]
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+  # -----------------------------------------------------------------------
+  # Optional PostgreSQL — uncomment for production
+  # -----------------------------------------------------------------------
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_DB: kyc_db
+  #     POSTGRES_USER: kyc_user
+  #     POSTGRES_PASSWORD: kyc_pass
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U kyc_user -d kyc_db"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+volumes:
+  uploads:
+  # pgdata:

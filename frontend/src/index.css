@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/* CIPHER KYC — Global Design System                                     */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --bg-primary:    #0A0F1C;
+  --bg-secondary:  #111827;
+  --bg-card:       rgba(17, 24, 39, 0.85);
+  --accent-primary:#06D6A0;
+  --accent-warning:#FFD166;
+  --accent-danger: #EF476F;
+  --accent-info:   #118AB2;
+  --text-primary:  #F9FAFB;
+  --text-secondary:#9CA3AF;
+  --border-subtle: rgba(255,255,255,0.08);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-secondary); }
+::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4B5563; }
+
+/* Glass card */
+.glass {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-subtle);
+}
+
+/* Glowing border on hover */
+.glow-border {
+  transition: box-shadow 0.3s ease;
+}
+.glow-border:hover {
+  box-shadow: 0 0 0 1px var(--accent-primary), 0 0 20px rgba(6,214,160,0.15);
+}
+
+/* Gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, #06D6A0, #118AB2);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Grid pattern background */
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Animated underline */
+.hover-underline::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  width: 0;
+  height: 2px;
+  background: var(--accent-primary);
+  transition: width 0.3s ease;
+}
+.hover-underline:hover::after { width: 100%; }
+
+/* Status badge colours */
+.badge-approved { @apply bg-emerald-500/20 text-emerald-400 border border-emerald-500/30; }
+.badge-review   { @apply bg-amber-500/20   text-amber-400   border border-amber-500/30; }
+.badge-rejected { @apply bg-rose-500/20    text-rose-400    border border-rose-500/30; }
+
+/* Processing step */
+.step-pending  { @apply text-gray-500; }
+.step-active   { @apply text-accent-info animate-pulse; }
+.step-done     { @apply text-accent-primary; }
+
+/* Confidence bar */
+.conf-bar-inner {
+  transition: width 1s ease-out;
+}
+
+/* Light mode overrides */
+.light {
+  --bg-primary:    #F8FAFC;
+  --bg-secondary:  #FFFFFF;
+  --bg-card:       rgba(255,255,255,0.9);
+  --text-primary:  #111827;
+  --text-secondary:#6B7280;
+  --border-subtle: rgba(0,0,0,0.08);
+}

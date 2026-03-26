@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+.env
+*.egg-info/
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# Uploads (user-submitted files)
+backend/uploads/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
