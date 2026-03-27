@@ -76,10 +76,16 @@ def preprocess_image(image_path: str) -> tuple[np.ndarray, list[str]]:
     Returns (processed_image, list_of_applied_steps).
     """
     applied = []
-    img = cv2.imread(image_path)
-    if img is None:
-        img_pil = Image.open(image_path).convert("RGB")
+    # Always load via PIL with EXIF transpose — phone cameras embed rotation metadata
+    # that cv2.imread ignores, causing sideways images and blank OCR results.
+    try:
+        from PIL import ImageOps
+        img_pil = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
         img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    except Exception:
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Cannot load image for OCR: {image_path}")
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 

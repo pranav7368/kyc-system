@@ -1,16 +1,18 @@
 import axios from 'axios'
 import toast from 'react-hot-toast'
 
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-
+// Empty baseURL → all requests are relative → Vite proxy forwards /api/* to backend.
+// This works from any device on the same network (phone, tablet, etc.)
 const api = axios.create({
-  baseURL: BASE_URL,
+  baseURL: '',
   timeout: 300_000, // 5 minutes — DeepFace + EasyOCR on CPU takes 90-180s
 })
 
-// Request interceptor — attach timestamp
+// Request interceptor — attach timestamp + auth token
 api.interceptors.request.use((config) => {
   config.metadata = { startTime: Date.now() }
+  const token = localStorage.getItem('kyc_token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
 

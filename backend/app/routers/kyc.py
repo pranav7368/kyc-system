@@ -7,24 +7,20 @@ import hashlib
 import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-
-
-def _iso(dt: datetime) -> str:
-    """Return ISO-8601 string always with UTC offset so browsers parse correctly."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat()
 from typing import Optional
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, case
 
+import json
 from app.config import settings
-from app.database import get_db, KYCVerification
+from app.database import get_db, KYCVerification, User
+from app.auth import get_current_user, get_current_user_optional, require_admin, decode_token
 from app.services import pipeline
+from app.services.storage_service import save_document_image, save_selfie_image, get_image_path
+from app.services.form_matcher import match as match_form
 
 logger = logging.getLogger("kyc.router")
 
@@ -32,6 +28,39 @@ ALLOWED_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
 ALLOWED_EXTS  = {".jpg", ".jpeg", ".png", ".webp"}
 
 router = APIRouter(prefix="/api/kyc", tags=["kyc"])
+
+# Document types that require both sides for complete data extraction
+# Aadhaar (physical card): address is on the back
+# Driving Licence (smart card): address is on the back
+# Voter ID (EPIC): residential details on the back
+NEEDS_BACK_SIDE = {"aadhaar", "driving_license", "voter_id"}
+
+
+@router.get("/doc-requirements")
+async def doc_requirements():
+    """Return which document types need both sides captured."""
+    return {
+        "needs_back_side": list(NEEDS_BACK_SIDE),
+        "supported_types": ["aadhaar", "pan", "passport", "driving_license", "voter_id"],
+        "back_side_message": {
+            "aadhaar":         "Aadhaar physical card has the full address printed on the back. Upload the back for complete address extraction.",
+            "driving_license": "Driving Licence (smart card) has address and vehicle classes on the back. Upload both sides.",
+            "voter_id":        "Voter ID (EPIC card) has residential address details on the back. Upload both sides.",
+        },
+        "front_only_ok": {
+            "aadhaar":         "If you have an e-Aadhaar printout or mAadhaar, the front side has all details.",
+            "driving_license": "Upload back side to include address and vehicle class information.",
+            "voter_id":        "Upload back side to include residential address.",
+        },
+    }
+
+
+def _iso(dt: datetime) -> str:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 def _validate_file(file: UploadFile, label: str):
@@ -51,36 +80,80 @@ async def _save_upload(file: UploadFile, dest: Path) -> str:
 # ---------------------------------------------------------------------------
 # POST /api/kyc/verify
 # ---------------------------------------------------------------------------
-
 @router.post("/verify")
 async def verify(
-    id_document: UploadFile = File(..., description="Government-issued ID image"),
+    id_document: UploadFile = File(..., description="Government-issued ID (front)"),
     selfie:      UploadFile = File(..., description="Live selfie of the applicant"),
+    id_document_back: Optional[UploadFile] = File(default=None, description="ID back side (optional)"),
+    challenge_completed: Optional[str] = Form(default=None),   # "true" if active liveness passed
+    user_form_data: Optional[str] = Form(default=None),         # JSON of user-submitted form fields
     db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     _validate_file(id_document, "id_document")
     _validate_file(selfie, "selfie")
+    if id_document_back:
+        _validate_file(id_document_back, "id_document_back")
 
     upload_dir = Path(settings.UPLOAD_DIR)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     doc_path    = upload_dir / f"{uuid.uuid4()}{Path(id_document.filename or '.jpg').suffix}"
     selfie_path = upload_dir / f"{uuid.uuid4()}{Path(selfie.filename or '.jpg').suffix}"
+    back_path   = None
+    if id_document_back:
+        back_path = upload_dir / f"{uuid.uuid4()}{Path(id_document_back.filename or '.jpg').suffix}"
+
+    verification_id = str(uuid.uuid4())
 
     try:
         doc_hash    = await _save_upload(id_document, doc_path)
         selfie_hash = await _save_upload(selfie, selfie_path)
+        back_hash   = None
+        if back_path and id_document_back:
+            back_hash = await _save_upload(id_document_back, back_path)
 
-        result = await pipeline.run_verification(str(doc_path), str(selfie_path))
+        liveness_challenge_passed = (challenge_completed or "").lower() == "true"
+        result = await pipeline.run_verification(
+            str(doc_path),
+            str(selfie_path),
+            str(back_path) if back_path else None,
+            liveness_challenge_passed=liveness_challenge_passed,
+        )
 
-        ocr     = result["ocr"]
-        face    = result["face"]
-        live    = result["liveness"]
-        fraud   = result["fraud"]
-        risk    = result["risk"]
+        ocr   = result["ocr"]
+        face  = result["face"]
+        live  = result["liveness"]
+        fraud = result["fraud"]
+        risk  = result["risk"]
+
+        # Run form matching if user submitted form data
+        form_data_parsed = None
+        form_match_result = None
+        if user_form_data:
+            try:
+                form_data_parsed = json.loads(user_form_data)
+                ocr_fields = result.get("ocr", {}).get("fields", {})
+                form_match_result = match_form(form_data_parsed, ocr_fields)
+                # If significant mismatch, increase risk
+                if form_match_result and not form_match_result.get("overall_match"):
+                    result["risk"]["risk_score"] = min(100, result["risk"]["risk_score"] + 8)
+                    result["risk"]["decision_reasons"].append(
+                        f"User form data does not match extracted ID fields (score: {form_match_result.get('match_score', 0):.0%})"
+                    )
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(f"Form matching failed: {e}")
+
+        # Save images to permanent storage
+        doc_storage_path     = save_document_image(verification_id, str(doc_path))
+        selfie_storage_path  = save_selfie_image(verification_id, str(selfie_path))
+        back_storage_path    = None
+        if back_path and back_path.exists():
+            back_storage_path = save_document_image(verification_id, str(back_path), suffix="_back")
 
         record = KYCVerification(
-            id=str(uuid.uuid4()),
+            id=verification_id,
+            user_id=current_user.id if current_user else None,
             document_type=ocr.get("document_type"),
             extracted_data=ocr,
             face_similarity=face.get("similarity"),
@@ -95,6 +168,11 @@ async def verify(
             processing_time_ms=result["processing_time_ms"],
             document_image_hash=doc_hash,
             selfie_image_hash=selfie_hash,
+            document_image_path=doc_storage_path,
+            document_back_image_path=back_storage_path,
+            selfie_image_path=selfie_storage_path,
+            user_form_data=form_data_parsed,
+            form_match_result=form_match_result,
         )
 
         db.add(record)
@@ -104,42 +182,97 @@ async def verify(
         return {
             "id": record.id,
             "created_at": _iso(record.created_at),
+            "has_back_image": back_storage_path is not None,
+            "form_match": form_match_result,
             **result,
         }
 
     finally:
-        # Clean up temp files
-        for p in [doc_path, selfie_path]:
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                pass
+        for p in [doc_path, selfie_path, back_path]:
+            if p:
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+
+# ---------------------------------------------------------------------------
+# GET /api/kyc/{id}/images/{image_type}  — serve stored images
+# ---------------------------------------------------------------------------
+@router.get("/{verification_id}/images/{image_type}")
+async def get_image(
+    verification_id: str,
+    image_type: str,   # "document" | "document_back" | "selfie"
+    token: Optional[str] = Query(default=None),  # fallback for <img> tags (can't send headers)
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    # <img> tags cannot set Authorization headers — accept ?token= as fallback
+    if current_user is None and token:
+        try:
+            payload = decode_token(token)
+            user_id = payload.get("sub")
+            if user_id:
+                r = await db.execute(select(User).where(User.id == user_id))
+                u = r.scalar_one_or_none()
+                if u and u.is_active:
+                    current_user = u
+        except Exception:
+            pass
+
+    if current_user is None:
+        raise HTTPException(401, "Authentication required to view images")
+
+    q = select(KYCVerification).where(KYCVerification.id == verification_id)
+    r = await db.execute(q)
+    record = r.scalar_one_or_none()
+    if not record:
+        raise HTTPException(404, "Verification not found")
+
+    # Users can only view their own; admins can view all
+    if current_user.role != "admin" and record.user_id != current_user.id:
+        raise HTTPException(403, "Not authorized to view this verification")
+
+    path_map = {
+        "document":      record.document_image_path,
+        "document_back": record.document_back_image_path,
+        "selfie":        record.selfie_image_path,
+    }
+    rel_path = path_map.get(image_type)
+    if not rel_path:
+        raise HTTPException(404, f"Image '{image_type}' not available")
+
+    abs_path = get_image_path(rel_path)
+    if not abs_path.exists():
+        raise HTTPException(404, "Image file not found on disk")
+
+    return FileResponse(str(abs_path), media_type="image/jpeg")
 
 
 # ---------------------------------------------------------------------------
 # GET /api/kyc/history
 # ---------------------------------------------------------------------------
-
 @router.get("/history")
 async def history(
     page:  int = Query(default=1,  ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     offset = (page - 1) * limit
 
-    count_q  = select(func.count()).select_from(KYCVerification)
-    count_r  = await db.execute(count_q)
-    total    = count_r.scalar() or 0
+    # Admins see all; regular users see only their own
+    base_filter = [] if current_user.role == "admin" else [KYCVerification.user_id == current_user.id]
 
-    items_q  = (
-        select(KYCVerification)
-        .order_by(desc(KYCVerification.created_at))
-        .offset(offset)
-        .limit(limit)
-    )
-    items_r  = await db.execute(items_q)
-    records  = items_r.scalars().all()
+    count_q = select(func.count()).select_from(KYCVerification)
+    if base_filter:
+        count_q = count_q.where(*base_filter)
+    total = (await db.execute(count_q)).scalar() or 0
+
+    items_q = select(KYCVerification).order_by(desc(KYCVerification.created_at)).offset(offset).limit(limit)
+    if base_filter:
+        items_q = items_q.where(*base_filter)
+    records = (await db.execute(items_q)).scalars().all()
 
     items = [
         {
@@ -148,8 +281,9 @@ async def history(
             "document_type": r.document_type,
             "face_similarity": r.face_similarity,
             "risk_score": r.risk_score,
-            "decision": r.decision,
+            "decision": r.admin_decision or r.decision,
             "processing_time_ms": r.processing_time_ms,
+            "reviewed": r.reviewed_at is not None,
         }
         for r in records
     ]
@@ -159,21 +293,22 @@ async def history(
         "total_count": total,
         "page": page,
         "limit": limit,
-        "total_pages": max(1, -(-total // limit)),  # ceiling division
+        "total_pages": max(1, -(-total // limit)),
     }
 
 
 # ---------------------------------------------------------------------------
 # GET /api/kyc/stats
 # ---------------------------------------------------------------------------
-
 @router.get("/stats")
-async def stats(db: AsyncSession = Depends(get_db)):
-    now   = datetime.now(timezone.utc)
-    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+async def stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    now        = datetime.now(timezone.utc)
+    today      = now.replace(hour=0, minute=0, second=0, microsecond=0)
     hour_start = now.replace(minute=0, second=0, microsecond=0)
 
-    # Aggregates
     agg_q = select(
         func.count().label("total"),
         func.sum(case((KYCVerification.decision == "APPROVED", 1), else_=0)).label("approved"),
@@ -183,59 +318,56 @@ async def stats(db: AsyncSession = Depends(get_db)):
         func.avg(KYCVerification.face_similarity).label("avg_face"),
         func.avg(KYCVerification.risk_score).label("avg_risk"),
     )
-    agg_r = await db.execute(agg_q)
-    row   = agg_r.fetchone()
+    row = (await db.execute(agg_q)).fetchone()
 
-    # Today & this hour
-    today_q = select(func.count()).where(KYCVerification.created_at >= today)
-    hour_q  = select(func.count()).where(KYCVerification.created_at >= hour_start)
-    today_count = (await db.execute(today_q)).scalar() or 0
-    hour_count  = (await db.execute(hour_q)).scalar()  or 0
+    today_count = (await db.execute(select(func.count()).where(KYCVerification.created_at >= today))).scalar() or 0
+    hour_count  = (await db.execute(select(func.count()).where(KYCVerification.created_at >= hour_start))).scalar() or 0
 
-    # Hourly distribution last 24h
     hourly = []
     for i in range(24):
         h_start = now - timedelta(hours=24 - i)
         h_end   = now - timedelta(hours=23 - i)
-        hq = select(func.count()).where(
-            KYCVerification.created_at >= h_start,
-            KYCVerification.created_at < h_end,
-        )
-        cnt = (await db.execute(hq)).scalar() or 0
+        cnt = (await db.execute(
+            select(func.count()).where(
+                KYCVerification.created_at >= h_start,
+                KYCVerification.created_at < h_end,
+            )
+        )).scalar() or 0
         hourly.append({"hour": h_start.strftime("%H:00"), "count": cnt})
 
-    def _safe(v, default=0):
-        return default if v is None else v
+    def _s(v, d=0):
+        return d if v is None else v
 
     return {
-        "total_verifications":    int(_safe(row.total)),
-        "approved_count":         int(_safe(row.approved)),
-        "review_count":           int(_safe(row.review)),
-        "rejected_count":         int(_safe(row.rejected)),
-        "avg_processing_time_ms": round(float(_safe(row.avg_time, 0.0)), 1),
-        "avg_face_similarity":    round(float(_safe(row.avg_face, 0.0)), 3),
-        "avg_risk_score":         round(float(_safe(row.avg_risk, 0.0)), 1),
-        "verifications_today":    today_count,
+        "total_verifications":     int(_s(row.total)),
+        "approved_count":          int(_s(row.approved)),
+        "review_count":            int(_s(row.review)),
+        "rejected_count":          int(_s(row.rejected)),
+        "avg_processing_time_ms":  round(float(_s(row.avg_time, 0.0)), 1),
+        "avg_face_similarity":     round(float(_s(row.avg_face, 0.0)), 3),
+        "avg_risk_score":          round(float(_s(row.avg_risk, 0.0)), 1),
+        "verifications_today":     today_count,
         "verifications_this_hour": hour_count,
-        "hourly_distribution":    hourly,
+        "hourly_distribution":     hourly,
     }
 
 
 # ---------------------------------------------------------------------------
 # GET /api/kyc/{id}
 # ---------------------------------------------------------------------------
-
 @router.get("/{verification_id}")
 async def get_verification(
     verification_id: str,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     q = select(KYCVerification).where(KYCVerification.id == verification_id)
-    r = await db.execute(q)
-    record = r.scalar_one_or_none()
-
+    record = (await db.execute(q)).scalar_one_or_none()
     if not record:
         raise HTTPException(404, "Verification not found")
+
+    if current_user.role != "admin" and record.user_id != current_user.id:
+        raise HTTPException(403, "Not authorized")
 
     return {
         "id": record.id,
@@ -249,7 +381,16 @@ async def get_verification(
         "fraud_flags": record.fraud_flags,
         "risk_score": record.risk_score,
         "risk_breakdown": record.risk_breakdown,
-        "decision": record.decision,
+        "decision": record.admin_decision or record.decision,
+        "original_decision": record.decision,
         "decision_reasons": record.decision_reasons,
         "processing_time_ms": record.processing_time_ms,
+        "reviewed_at": _iso(record.reviewed_at),
+        "review_notes": record.review_notes,
+        "admin_decision": record.admin_decision,
+        "has_document_image": record.document_image_path is not None,
+        "has_selfie_image": record.selfie_image_path is not None,
+        "has_back_image": record.document_back_image_path is not None,
+        "user_form_data": record.user_form_data,
+        "form_match_result": record.form_match_result,
     }

@@ -9,10 +9,27 @@ Key design decisions:
 - Numpy arrays passed directly (not file paths): eliminates path/IO issues in threads.
 - Facenet512 chosen: 512-dim embedding, strong accuracy, no MSVC build tools needed.
 """
+import os
 import logging
 import numpy as np
 import cv2
 from typing import Optional, Tuple
+
+# TensorFlow 2.21 was compiled with protobuf 6.x gencode but the installed
+# protobuf runtime may be 5.x — this causes a VersionError on import.
+# Forcing the pure-Python implementation bypasses the C++ version check entirely.
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
+# protobuf 4.x+ removed MessageFactory.GetPrototype; TF 2.21 still calls it
+# internally during initialization. Patch it back before TF loads.
+try:
+    from google.protobuf import message_factory as _mf
+    if not hasattr(_mf.MessageFactory, "GetPrototype"):
+        def _get_prototype(self, descriptor):
+            return _mf.GetMessageClass(descriptor)
+        _mf.MessageFactory.GetPrototype = _get_prototype
+except Exception:
+    pass
 
 logger = logging.getLogger("kyc.face")
 
@@ -54,12 +71,16 @@ def get_face_app():
 
 
 def _load_image(path: str) -> np.ndarray:
-    img = cv2.imread(path)
-    if img is None:
-        from PIL import Image
-        pil = Image.open(path).convert("RGB")
-        img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-    return img
+    """Load image with EXIF orientation applied (phone cameras embed rotation metadata)."""
+    try:
+        from PIL import Image, ImageOps
+        pil = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+        return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    except Exception:
+        img = cv2.imread(path)
+        if img is None:
+            raise ValueError(f"Cannot load image: {path}")
+        return img
 
 
 def _blur_score(img: np.ndarray) -> float:

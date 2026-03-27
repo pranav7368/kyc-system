@@ -1,5 +1,5 @@
 """
-CIPHER KYC — FastAPI application entry point.
+AI KYC — FastAPI application entry point.
 """
 import logging
 import os
@@ -12,8 +12,11 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import create_tables
+from app.db_migrate import run_migrations
 from app.middleware import RequestIDMiddleware, TimingMiddleware, LoggingMiddleware
 from app.routers import health, kyc
+from app.routers.auth import router as auth_router
+from app.routers.admin import router as admin_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -31,15 +34,17 @@ logger = logging.getLogger("kyc.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- STARTUP ---
-    logger.info("CIPHER KYC starting up…")
+    logger.info("AI KYC starting up…")
 
-    # Create DB tables
+    # Create DB tables, then apply any missing column migrations
     await create_tables()
+    run_migrations()
     logger.info("Database tables ready.")
 
-    # Create upload directory
+    # Create directories
     Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
-    logger.info(f"Upload directory: {settings.UPLOAD_DIR}")
+    Path(settings.STORAGE_DIR).mkdir(parents=True, exist_ok=True)
+    logger.info(f"Upload dir: {settings.UPLOAD_DIR} | Storage dir: {settings.STORAGE_DIR}")
 
     # Pre-warm ML models (so first request is fast)
     try:
@@ -66,18 +71,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"Liveness pre-warm skipped: {exc}")
 
-    logger.info("All models loaded. CIPHER KYC is ready!")
+    logger.info("All models loaded. AI KYC is ready!")
     yield
 
     # --- SHUTDOWN ---
-    logger.info("CIPHER KYC shutting down.")
+    logger.info("AI KYC shutting down.")
 
 
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="CIPHER KYC",
+    title="AI KYC",
     description=(
         "Autonomous Identity Verification System — AI-powered KYC in under 3 seconds. "
         "Supports Aadhaar, PAN, Passport, and Driving Licence."
@@ -88,11 +93,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS — when origins include "*" we must disable credentials (browser requirement)
+_wildcard_cors = "*" in settings.CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=not _wildcard_cors,   # credentials=True incompatible with "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -122,13 +128,15 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Routers
 # ---------------------------------------------------------------------------
 app.include_router(health.router)
+app.include_router(auth_router)
 app.include_router(kyc.router)
+app.include_router(admin_router)
 
 
 @app.get("/", include_in_schema=False)
 async def root():
     return {
-        "service": "CIPHER KYC",
+        "service": "AI KYC",
         "version": "1.0.0",
         "docs": "/docs",
         "health": "/api/health",
