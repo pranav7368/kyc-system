@@ -8,7 +8,7 @@ export function useKYC() {
   const [error, setError]       = useState(null)
   const [progress, setProgress] = useState(0)
 
-  const verify = useCallback(async (docFile, selfieFile) => {
+  const verify = useCallback(async (docFile, selfieFile, meta = {}) => {
     setLoading(true)
     setError(null)
     setResult(null)
@@ -17,6 +17,9 @@ export function useKYC() {
     const fd = new FormData()
     fd.append('id_document', docFile)
     fd.append('selfie', selfieFile)
+    if (meta.challenge_completed) fd.append('challenge_completed', 'true')
+    if (meta.docBackFile)  fd.append('id_document_back', meta.docBackFile)
+    if (meta.userFormData) fd.append('user_form_data', JSON.stringify(meta.userFormData))
 
     try {
       const data = await verifyKYC(fd, (evt) => {

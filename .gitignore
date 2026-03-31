@@ -17,8 +17,12 @@ env/
 # Logs
 *.log
 
-# Uploads (user-submitted files)
+# Uploads and stored user images
 backend/uploads/
+backend/storage/
+
+# Pip artifacts (e.g. pip install =0.5.0 typo)
+backend/=*
 
 # Node / Frontend
 frontend/node_modules/

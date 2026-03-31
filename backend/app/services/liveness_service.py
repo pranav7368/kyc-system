@@ -134,8 +134,15 @@ def _skin_tone_analysis(img_bgr: np.ndarray) -> float:
 # Public API
 # ---------------------------------------------------------------------------
 
-def check(image_path: str) -> dict:
-    """Passive liveness check on a selfie image."""
+def check(image_path: str, challenge_completed: bool = False) -> dict:
+    """
+    Liveness check combining passive image analysis + active challenge bonus.
+
+    Passive checks run on the selfie image (texture, symmetry, skin tone, etc.).
+    If the user also completed the 4-pose active challenge in the browser UI,
+    a bonus of +0.15 is added (capped at 1.0). Active challenges prove the
+    subject is physically present and interacting — not a static photo or screen.
+    """
     img = _load_image(image_path)
 
     face_roi = _get_face_roi(img)
@@ -151,12 +158,23 @@ def check(image_path: str) -> dict:
     }
 
     weights = [0.30, 0.25, 0.20, 0.15, 0.10]
-    liveness_score = sum(v * w for v, w in zip(checks.values(), weights))
-    liveness_score = round(min(1.0, max(0.0, liveness_score)), 4)
+    passive_score = sum(v * w for v, w in zip(checks.values(), weights))
+    passive_score = round(max(0.0, min(1.0, passive_score)), 4)
+
+    # Active challenge bonus — proven human interaction
+    challenge_bonus = 0.15 if challenge_completed else 0.0
+    liveness_score  = round(min(1.0, passive_score + challenge_bonus), 4)
+
+    logger.info(
+        f"Liveness: passive={passive_score} challenge_bonus={challenge_bonus} "
+        f"final={liveness_score} challenge_completed={challenge_completed}"
+    )
 
     return {
-        "liveness_score": liveness_score,
-        "is_live": bool(liveness_score >= 0.55),
-        "checks": checks,
+        "liveness_score":       liveness_score,
+        "is_live":              bool(liveness_score >= 0.55),
+        "checks":               checks,
+        "passive_score":        passive_score,
+        "challenge_completed":  challenge_completed,
         "anti_spoof_confidence": round(liveness_score * 0.95, 4),
     }
