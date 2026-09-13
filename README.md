@@ -12,8 +12,8 @@ Manual identity review is slow and difficult to audit. CIPHER KYC explores how s
 
 1. A React client submits an identity-document image and a selfie.
 2. The FastAPI service validates the request and runs the verification modules.
-3. EasyOCR and OpenCV extract and preprocess document text.
-4. InsightFace compares the document portrait with the submitted selfie.
+3. EasyOCR and OpenCV extract and preprocess document text; an optional Gemini-based OCR service provides an additional extraction path when configured.
+4. DeepFace (Facenet512) compares the document portrait with the submitted selfie.
 5. MediaPipe-based checks produce passive liveness signals.
 6. Image-forensics checks surface possible document-manipulation signals.
 7. A weighted risk engine returns **APPROVED**, **REVIEW**, or **REJECTED**, together with component results.
@@ -27,7 +27,7 @@ React client
     v
 FastAPI API
     |-- OCR: EasyOCR + OpenCV
-    |-- Face matching: InsightFace
+    |-- Face matching: DeepFace (Facenet512)
     |-- Passive liveness: MediaPipe
     |-- Image-forensics checks
     |-- Weighted risk engine
@@ -40,7 +40,8 @@ SQLite by default / PostgreSQL optional
 
 - **Frontend:** React, JavaScript
 - **Backend:** FastAPI, Python, asynchronous request handling
-- **Computer vision:** OpenCV, EasyOCR, InsightFace, MediaPipe
+- **Computer vision:** OpenCV, EasyOCR, DeepFace (Facenet512), MediaPipe
+- **Optional document extraction:** Google Gemini, when configured
 - **Data:** SQLite by default, PostgreSQL optional
 - **Delivery:** Docker Compose
 - **API documentation:** OpenAPI/Swagger and ReDoc
